@@ -1,0 +1,71 @@
+# n8n — Viewport deploy overlay (Dokploy, new engine)
+# Derived verbatim from the official n8n-io/n8n-hosting `withPostgres` compose,
+# with Viewport guardrail edits applied (pinned tag, secrets-by-name, internal-only).
+# Sub-issue: viewport-ops #414 (Part of #404) | Project: Automation and Workflows
+# Upstream source-of-truth: https://github.com/n8n-io/n8n-hosting/tree/main/docker-compose/withPostgres
+
+volumes:
+  db_storage:
+  n8n_storage:
+
+services:
+  postgres:
+    image: postgres:16
+    restart: always
+    environment:
+      - POSTGRES_USER
+      - POSTGRES_PASSWORD
+      - POSTGRES_DB
+      - POSTGRES_NON_ROOT_USER
+      - POSTGRES_NON_ROOT_PASSWORD
+    volumes:
+      - db_storage:/var/lib/postgresql/data
+      - ./init-data.sh:/docker-entrypoint-initdb.d/init-data.sh
+    healthcheck:
+      test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  n8n:
+    # Pinned to the latest stable n8n release (2.27.4) — never :stable/:latest for a stateful service.
+    # docker.n8n.io/n8nio/n8n mirrors Docker Hub n8nio/n8n; the 2.27.4 tag exists on both.
+    image: docker.n8n.io/n8nio/n8n:${N8N_VERSION}
+    restart: always
+    environment:
+      - DB_TYPE=postgresdb
+      - DB_POSTGRESDB_HOST=postgres
+      - DB_POSTGRESDB_PORT=5432
+      - DB_POSTGRESDB_DATABASE=${POSTGRES_DB}
+      - DB_POSTGRESDB_USER=${POSTGRES_NON_ROOT_USER}
+      - DB_POSTGRESDB_PASSWORD=${POSTGRES_NON_ROOT_PASSWORD}
+      # External task-runner mode (upstream default). Broker listens for the runner sidecar.
+      - N8N_RUNNERS_MODE=external
+      - N8N_RUNNERS_AUTH_TOKEN=${RUNNERS_AUTH_TOKEN}
+      - N8N_RUNNERS_BROKER_LISTEN_ADDRESS=0.0.0.0
+      # CRITICAL: encrypts stored credentials. Supplied as a Dokploy secret (name only in git).
+      # Must be set before first boot; losing it permanently locks all saved credentials.
+      - N8N_ENCRYPTION_KEY=${N8N_ENCRYPTION_KEY}
+      # Schedule/cron correctness.
+      - GENERIC_TIMEZONE=${GENERIC_TIMEZONE}
+      - TZ=${GENERIC_TIMEZONE}
+    # Internal-only: container port 5678 is reachable on the Dokploy network for health
+    # checks. NO host publish / NO Traefik domain / NO :80/:443 this stage (per guardrails).
+    expose:
+      - 5678
+    links:
+      - postgres
+    volumes:
+      - n8n_storage:/home/node/.n8n
+    depends_on:
+      postgres:
+        condition: service_healthy
+
+  n8n-runner:
+    image: n8nio/runners:${N8N_VERSION}
+    restart: always
+    environment:
+      - N8N_RUNNERS_AUTH_TOKEN=${RUNNERS_AUTH_TOKEN}
+      - N8N_RUNNERS_TASK_BROKER_URI=http://n8n:5679
+    depends_on:
+      - n8n
