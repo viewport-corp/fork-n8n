@@ -3,10 +3,32 @@
 # with Viewport guardrail edits applied (pinned tag, secrets-by-name, internal-only).
 # Sub-issue: viewport-ops #414 (Part of #404) | Project: Automation and Workflows
 # Upstream source-of-truth: https://github.com/n8n-io/n8n-hosting/tree/main/docker-compose/withPostgres
+#
+# NOTE (#414): the postgres init script is delivered via a Compose `configs` block with
+# inline content instead of a host file bind-mount. This Dokploy instance runs in a
+# container with a remapped data dir (/etc/dokploy-new on host -> /etc/dokploy in the
+# container), so a single-file bind source does not resolve on the host daemon and Docker
+# auto-creates an empty directory ("Is a directory" init failure). `configs` writes the
+# file inside the container with no host path, sidestepping that path-translation entirely.
 
 volumes:
   db_storage:
   n8n_storage:
+
+configs:
+  pg_init_data:
+    content: |
+      #!/bin/bash
+      set -e;
+      if [ -n "$${POSTGRES_NON_ROOT_USER:-}" ] && [ -n "$${POSTGRES_NON_ROOT_PASSWORD:-}" ]; then
+        psql -v ON_ERROR_STOP=1 --username "$$POSTGRES_USER" --dbname "$$POSTGRES_DB" <<-EOSQL
+          CREATE USER $${POSTGRES_NON_ROOT_USER} WITH PASSWORD '$${POSTGRES_NON_ROOT_PASSWORD}';
+          GRANT ALL PRIVILEGES ON DATABASE $${POSTGRES_DB} TO $${POSTGRES_NON_ROOT_USER};
+          GRANT CREATE ON SCHEMA public TO $${POSTGRES_NON_ROOT_USER};
+      EOSQL
+      else
+        echo "SETUP INFO: No Environment variables given!"
+      fi
 
 services:
   postgres:
@@ -20,12 +42,16 @@ services:
       - POSTGRES_NON_ROOT_PASSWORD
     volumes:
       - db_storage:/var/lib/postgresql/data
-      - ./init-data.sh:/docker-entrypoint-initdb.d/init-data.sh
+    configs:
+      - source: pg_init_data
+        target: /docker-entrypoint-initdb.d/init-data.sh
+        mode: 0755
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
       interval: 5s
       timeout: 5s
       retries: 10
+      start_period: 30s
 
   n8n:
     # Pinned to the latest stable n8n release (2.27.4) — never :stable/:latest for a stateful service.
