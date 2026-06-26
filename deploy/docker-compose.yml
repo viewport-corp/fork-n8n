@@ -43,9 +43,12 @@ services:
     volumes:
       - db_storage:/var/lib/postgresql/data
     configs:
+      # No mode set -> defaults to 0444 (read-only). The postgres entrypoint sources
+      # non-executable .sh init files (`. "$f"`), which only needs read. An explicit
+      # `mode: 0755` is mis-parsed by this Compose as decimal 755 -> octal 01363
+      # (no owner-read) and breaks sourcing, so we rely on the safe default instead.
       - source: pg_init_data
         target: /docker-entrypoint-initdb.d/init-data.sh
-        mode: 0755
     healthcheck:
       test: ['CMD-SHELL', 'pg_isready -h localhost -U ${POSTGRES_USER} -d ${POSTGRES_DB}']
       interval: 5s
